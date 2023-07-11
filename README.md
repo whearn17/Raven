@@ -1,6 +1,6 @@
 # Raven v0.4 - Audit Log Retriever
 
-Raven is a PowerShell script used to fetch audit log records from Exchange Online within a specified date range and exports them to a CSV file.
+Raven is a PowerShell script used to fetch audit log records from Microsoft Purview within a specified date range and exports them to a CSV file.
 
 ## Pre-requisites
 
