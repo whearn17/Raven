@@ -12,7 +12,7 @@ function Write-LogMessage($message, $foregroundColor = 'Green') {
 
 function Show-Logo {
     Clear-Host
-    Write-Host @"
+    $logo = @"
     @                                                             
     @   @@  @                                                        
      @@* @@ .@                                                       
@@ -39,12 +39,72 @@ function Show-Logo {
                 &@,@@@ ,#@ ,     %  
 
 "@
-    Write-LogMessage "Raven v0.6"
+$logo.ToCharArray() | ForEach-Object {
+    Write-Host $_ -NoNewline
+    Start-Sleep -Milliseconds .02
 }
+    Write-Host ""
+    Write-LogMessage "Raven v1.0"
+}
+
+
+function Expand-Property($object, $parentName = $null) {
+    $properties = @{}
+    foreach ($property in $object.PSObject.Properties) {
+        $key = if ($parentName) { "$parentName.$($property.Name)" } else { $property.Name }
+        if ($property.Value -is [PSCustomObject]) {
+            $properties += Expand-Property -object $property.Value -parentName $key
+        } else {
+            $properties[$key] = $property.Value
+        }
+    }
+    return $properties
+}
+
+
+function Format-AuditData($inputFile) {
+    # Read the CSV file
+    $data = Import-Csv -Path $inputFile
+
+    $outputFile = $inputFile + "ParsedAuditLogs.csv"
+
+    # Initialize an empty array to hold the parsed data
+    $parsedData = @()
+
+    # Loop over each row in the data
+    foreach ($row in $data) {
+        # Create a new dictionary
+        $rowDict = @{}
+
+        # Add properties from the original row to the dictionary
+        foreach ($property in $row.PSObject.Properties) {
+            if ($property.Name -ne 'AuditData') {
+                $rowDict[$property.Name] = $property.Value
+            }
+        }
+
+        # Parse the JSON in the 'AuditData' column
+        $auditData = ConvertFrom-Json -InputObject $row.AuditData
+
+        # Remove the 'RecordType' property from $auditData
+        $auditData.PSObject.Properties.Remove('RecordType')
+
+        # Add properties from the parsed JSON to the dictionary
+        $rowDict += Expand-Property -object $auditData
+
+        # Convert the dictionary to a PSObject and add it to the parsed data
+        $parsedData += New-Object PSObject -Property $rowDict
+    }
+
+    # Write the parsed data to a new CSV file
+    $parsedData | Export-Csv -Path $outputFile -NoTypeInformation
+}
+
 
 
 function Read-UserInput {
     $userInput = Read-Host "Please enter the start date (as a number of days ago between 0 and 90, defaults to 90)"
+    $startDaysAgo = $null
     if (![int32]::TryParse($userInput, [ref]$startDaysAgo)) {
         Write-LogMessage "Invalid input. Please enter a valid number." 'Red'
         exit
@@ -111,6 +171,8 @@ function Get-AuditRecords($start, $end, $outputFile) {
 
         Show-Progress $intervalCount $totalIntervals
     }
+
+    Write-LogMessage "Raven finished"
 }
 
 
@@ -153,6 +215,8 @@ function main {
     Show-Logo
     Connect-ExchangeService
     Get-AuditRecords $start $end $outputFile
+
+    Format-AuditData -inputFile $outputFile
 }
 
 main
