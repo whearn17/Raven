@@ -3,7 +3,7 @@ param (
     [string]$UserPrincipalName
 )
 
-function Write-LogMessage($message, $foregroundColor = 'Green') {
+function Write-LogMessage($message, $foregroundColor = 'White') {
     $date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $colorMessage = "$date - $message"
     Microsoft.PowerShell.Utility\Write-Host -ForegroundColor $foregroundColor $colorMessage
@@ -44,7 +44,7 @@ $logo.ToCharArray() | ForEach-Object {
     Start-Sleep -Milliseconds .02
 }
     Write-Host ""
-    Write-LogMessage "Raven v1.0"
+    Write-LogMessage "RavenDev v1.2" "Green"
 }
 
 
@@ -62,11 +62,20 @@ function Expand-Property($object, $parentName = $null) {
 }
 
 
-function Format-AuditData($inputFile) {
+function Format-AuditData($path) {
+    $inputFile = "$($path)\AuditLogs_$($UserPrincipalName).csv"
+
+    # Check if the file exists
+    if (!(Test-Path -Path $inputFile)) {
+        return
+    }
+
+    Write-LogMessage "Unpacking Audit Logs"
+
     # Read the CSV file
     $data = Import-Csv -Path $inputFile
 
-    $outputFile = $inputFile + "ParsedAuditLogs.csv"
+    $outputFile = "$($path)\Converted_AuditLogs_$($UserPrincipalName).csv"
 
     # Initialize an empty array to hold the parsed data
     $parsedData = @()
@@ -97,7 +106,9 @@ function Format-AuditData($inputFile) {
     }
 
     # Write the parsed data to a new CSV file
-    $parsedData | Export-Csv -Path $outputFile -NoTypeInformation
+    $parsedData | Export-Csv -Path $outputFile -NoTypeInformation -Encoding UTF8
+
+    Write-LogMessage "Finished Unpacking Audit Logs" "Green"
 }
 
 
@@ -105,7 +116,13 @@ function Format-AuditData($inputFile) {
 function Read-UserInput {
     $userInput = Read-Host "Please enter the start date (as a number of days ago between 0 and 90, defaults to 90)"
     $startDaysAgo = $null
-    if (![int32]::TryParse($userInput, [ref]$startDaysAgo)) {
+    
+    # Set the default value if the input is empty
+    if ([string]::IsNullOrWhiteSpace($userInput)) { 
+        $startDaysAgo = 90 
+    }
+    # Validate the input if it is not empty
+    elseif (![int32]::TryParse($userInput, [ref]$startDaysAgo)) {
         Write-LogMessage "Invalid input. Please enter a valid number." 'Red'
         exit
     }
@@ -117,16 +134,14 @@ function Read-UserInput {
         exit
     }
 
-    if ([string]::IsNullOrWhiteSpace($startDaysAgo)) { $startDaysAgo = 90 }
-
     if ($startDaysAgo -lt 0 -or $startDaysAgo -gt 90) {
         Write-LogMessage "Start date should be between 0 and 90 days ago" 'Red'
         exit
     }
 
-    $outputFile = Join-Path -Path $directory -ChildPath "AuditLogRecords.csv"
-    return $startDaysAgo, $outputFile
+    return $startDaysAgo, $directory
 }
+
 
 
 
@@ -140,6 +155,7 @@ function Get-DateRange($startDaysAgo) {
 function Connect-ExchangeService {
     if (!(Get-ConnectionInformation | Where-Object { $_.Name -match 'ExchangeOnline' -and $_.state -eq 'Connected' })) { 
         Connect-ExchangeOnline -ShowBanner:$false
+        Write-LogMessage "Connected to Exchange" "Green"
     }
     else {
         Write-LogMessage "Already connected to Exchange Online"
@@ -153,27 +169,19 @@ function Connect-ExchangeService {
 }
 
 
-function Get-AuditRecords($start, $end, $outputFile) {
-    $resultSize = 5000
-    $intervalMinutes = 60
-    $totalIntervals = [Math]::Ceiling(($end - $start).TotalMinutes / $intervalMinutes)
+function Get-AllAuditRecords($start, $end, $operationType, $outputPath) {
+    $resultSize = 1000
+    $sessionID = New-SessionID
 
-    [DateTime]$currentEnd = $end
+    Write-LogMessage "Extracting $($operationType) Logs"
 
-    for ($intervalCount = 0; $intervalCount -lt $totalIntervals; $intervalCount++) {
-        
-        $currentStart, $currentEnd = Get-TimeInterval $start $end $intervalMinutes $intervalCount
-        $sessionID = New-SessionID
+    do {
+        $results = Search-AuditLog $start $end $sessionID $resultSize $UserPrincipalName $outputPath $operationType
+    } while ($results)
 
-        do {
-            $results = Search-AuditLog $currentStart $currentEnd $sessionID $resultSize $UserPrincipalName $outputFile
-        } while ($results)
-
-        Show-Progress $intervalCount $totalIntervals
-    }
-
-    Write-LogMessage "Raven finished"
+    Write-LogMessage "Finished Extracting $($operationType) Logs" "Green"
 }
+
 
 
 function Get-TimeInterval($start, $end, $intervalMinutes, $intervalCount) {
@@ -193,13 +201,34 @@ function New-SessionID() {
 }
 
 
-function Search-AuditLog($currentStart, $currentEnd, $sessionID, $resultSize, $UserPrincipalName, $outputFile) {
-    $results = Search-UnifiedAuditLog -StartDate $currentStart -EndDate $currentEnd -SessionId $sessionID -SessionCommand ReturnLargeSet -ResultSize $resultSize -UserIds $UserPrincipalName
+function Search-AuditLog($start, $end, $sessionID, $resultSize, $UserPrincipalName, $outputPath, $operationType) {
+    $maxRetries = 3
+    $retryCount = 0
 
-    if (($results | Measure-Object).Count -ne 0) {
-        $results | Export-Csv -Path $outputFile -Append -NoTypeInformation
-        return $results
+    while ($retryCount -lt $maxRetries) {
+        try {
+            $results = Search-UnifiedAuditLog -StartDate $start -EndDate $end -SessionId $sessionID -SessionCommand ReturnLargeSet -ResultSize $resultSize -UserIds $UserPrincipalName -RecordType $operationType
+
+            if (($results | Measure-Object).Count -ne 0) {
+                $results | Export-Csv -Path "$($outputPath)\AuditLogs_$($UserPrincipalName).csv" -Append -NoTypeInformation -Encoding UTF8
+            }
+
+            return $results
+        }
+        catch {
+            if ($_.Exception.Message -like "*503*") {
+                Write-LogMessage "Server unavailable. Retrying in 10 seconds..." 'Yellow'
+                Start-Sleep -Seconds 10
+                $retryCount++
+                continue
+            }
+            else {
+                throw $_
+            }
+        }
     }
+    Write-LogMessage "Server unavailable after $maxRetries retries. Exiting..." 'Red'
+    exit
 }
 
 
@@ -210,13 +239,22 @@ function Show-Progress($intervalCount, $totalIntervals) {
 
 
 function main {
-    $startDaysAgo, $outputFile = Read-UserInput
+    $startDaysAgo, $outputPath = Read-UserInput
     $start, $end = Get-DateRange $startDaysAgo
-    Show-Logo
-    Connect-ExchangeService
-    Get-AuditRecords $start $end $outputFile
 
-    Format-AuditData -inputFile $outputFile
+    Show-Logo
+
+    Write-LogMessage "Searching from $start to $end" "Green"
+
+    Connect-ExchangeService
+
+    $operations =  "SharePointFileOperation", "SharePoint", "OneDrive", "SharePointSearch", "ExchangeSearch"
+   
+    foreach ($operationType in $operations) {
+        Get-AllAuditRecords $start $end $operationType $outputPath
+    }
+    
+    Format-AuditData $outputPath
 }
 
 main
